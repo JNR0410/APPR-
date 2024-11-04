@@ -1,0 +1,113 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger:
+  branches:
+    include:
+      - main # Trigger pipeline on changes to the main branch
+
+stages:
+  - stage: Build
+    displayName: 'Build Stage'
+    jobs:
+      - job: Build
+        displayName: 'Build Job'
+        pool:
+          vmImage: 'windows-latest'
+        steps:
+          - task: UseDotNet@2
+            inputs:
+              packageType: 'sdk'
+              version: '6.x'
+              installationPath: $(Agent.ToolsDirectory)/dotnet
+          - task: DotNetCoreCLI@2
+            displayName: 'Restore NuGet Packages'
+            inputs:
+              command: 'restore'
+              projects: '**/*.csproj'
+          - task: DotNetCoreCLI@2
+            displayName: 'Build Solution'
+            inputs:
+              command: 'build'
+              projects: '**/*.csproj'
+              arguments: '--configuration Release'
+          - task: DotNetCoreCLI@2
+            displayName: 'Run Unit Tests'
+            inputs:
+              command: 'test'
+              projects: '**/*.csproj'
+
+  - stage: Deploy
+    displayName: 'Deploy Stage'
+    dependsOn: Build
+    jobs:
+      - deployment: Deploy
+        displayName: 'Deploy to Production'
+        environment: 'Production'
+        pool:
+          vmImage: 'windows-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadBuildArtifacts@0
+                  displayName: 'Download Artifacts'
+                  inputs:
+                    artifactName: 'drop'
+                    downloadPath: $(System.ArtifactsDirectory)
+
+                - task: AzureWebApp@1
+                  displayName: 'Deploy to Azure Web App'
+                  inputs:
+                    azureSubscription: '<Your-Azure-Subscription>'
+                    appType: 'webApp'
+                    appName: '<Your-WebApp-Name>'
+                    package: '$(System.ArtifactsDirectory)/**/*.zip'
+
+                # Health Check
+                - task: PowerShell@2
+                  displayName: 'Run Health Check'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      $url = "<Your-Application-URL>/health"
+                      $response = Invoke-WebRequest -Uri $url -UseBasicParsing
+                      if ($response.StatusCode -ne 200) {
+                        Write-Host "Health check failed."
+                        exit 1
+                      } else {
+                        Write-Host "Health check passed."
+                      }
+
+                # Error Handling and Rollback
+                - task: AzureCLI@2
+                  displayName: 'Rollback if Health Check Fails'
+                  condition: failed()
+                  inputs:
+                    azureSubscription: '<Your-Azure-Subscription>'
+                    scriptType: 'ps'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      Write-Host "Deployment failed, initiating rollback..."
+                      az webapp deployment slot swap --name <Your-WebApp-Name> --slot staging --target-slot production
+                      Write-Host "Rollback complete."
+
+                # Notifications
+                - task: SlackNotification@1
+                  displayName: 'Notify Deployment Status'
+                  condition: succeededOrFailed()
+                  inputs:
+                    webhookUrl: '<Your-Slack-Webhook-URL>'
+                    message: |
+                      The deployment to $(environmentName) was $(Build.Status).
+
+        # Rollback Strategy
+        rollback:
+          steps:
+            - script: |
+                echo "Performing rollback..."
+                az webapp deployment slot swap --name <Your-WebApp-Name> --slot staging --target-slot production
+                echo "Rollback completed."
+              displayName: 'Rollback Deployment'
